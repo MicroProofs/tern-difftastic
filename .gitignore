@@ -1,0 +1,6 @@
+# Written by `tern plugin types .` for luau-lsp; regenerate per Tern version.
+tern.d.luau
+__pycache__/
+# Local test harness: built around private repositories, kept out of the published repo.
+test/*
+!test/luau_check.py

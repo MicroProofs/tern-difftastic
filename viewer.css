@@ -1,0 +1,219 @@
+/* The dft viewer block. Rows are exactly one terminal line high (--sf-lh), so
+   the block's height in cells says how many fit (host.luau: height()). Colors
+   come from Tern's theme variables, as in difftastic.css. */
+
+.sf-main[data-surface='plugin.dft-viewer.diff'],
+.sf-dock[data-surface='plugin.dft-viewer.diff'] {
+	padding: 0 !important;
+	gap: 0 !important;
+}
+
+[data-surface='plugin.dft-viewer.diff'] {
+	.dv-g {
+		display: block;
+		font-family: var(--tv-font, var(--mono));
+	}
+
+	.dv-r {
+		height: var(--sf-lh);
+		line-height: var(--sf-lh);
+		white-space: pre;
+		overflow: hidden;
+		color: var(--t2);
+	}
+
+	/* A file's rows other than its header sit in a block of columns (host.luau view): side by side
+	   the gutter (mark, old line number), the old code, the new line numbers and the new code;
+	   unified (.dv-fu) the gutter (mark, both line numbers) and the code. Every piece is one line
+	   high, so a row's pieces line up across columns. */
+	.dv-fb { display: grid; grid-template-columns: calc(var(--sf-cw) * 7) minmax(0, 1fr) calc(var(--sf-cw) * 5) minmax(0, 1fr); }
+	.dv-fu { grid-template-columns: calc(var(--sf-cw) * 12) minmax(0, 1fr); }
+	.dv-w3 .dv-fb { grid-template-columns: calc(var(--sf-cw) * 6) minmax(0, 1fr) calc(var(--sf-cw) * 4) minmax(0, 1fr); }
+	.dv-w3 .dv-fu { grid-template-columns: calc(var(--sf-cw) * 10) minmax(0, 1fr); }
+	.dv-w5 .dv-fb { grid-template-columns: calc(var(--sf-cw) * 8) minmax(0, 1fr) calc(var(--sf-cw) * 6) minmax(0, 1fr); }
+	.dv-w5 .dv-fu { grid-template-columns: calc(var(--sf-cw) * 14) minmax(0, 1fr); }
+	.dv-w6 .dv-fb { grid-template-columns: calc(var(--sf-cw) * 9) minmax(0, 1fr) calc(var(--sf-cw) * 7) minmax(0, 1fr); }
+	.dv-w6 .dv-fu { grid-template-columns: calc(var(--sf-cw) * 16) minmax(0, 1fr); }
+	.dv-w7 .dv-fb { grid-template-columns: calc(var(--sf-cw) * 10) minmax(0, 1fr) calc(var(--sf-cw) * 8) minmax(0, 1fr); }
+	.dv-w7 .dv-fu { grid-template-columns: calc(var(--sf-cw) * 18) minmax(0, 1fr); }
+
+	.dv-ga { display: grid; grid-template-columns: calc(var(--sf-cw) * 2) 1fr; }
+	.dv-fu .dv-ga { grid-template-columns: calc(var(--sf-cw) * 2) 1fr 1fr; }
+
+	/* A code column scrolls sideways on its own (a trackpad swipe or shift-wheel over it). Each
+	   piece is as wide as its line and at least the column, so a tint runs under its whole line.
+	   The border keeps a 1-column gap after the line numbers: overflow clips inside it. */
+	.dv-s {
+		min-width: 0;
+		overflow-x: auto;
+		overflow-y: hidden;
+		border-left: calc(var(--sf-cw) * 1) solid transparent;
+		scrollbar-width: thin;
+	}
+
+	.dv-s > .dv-r { width: max-content; min-width: 100%; }
+
+	/* Syntax colors: Tern's code node lies over each code column, a line per row (host.luau
+	   view), its box stripped to the lines; the pieces under it draw tints, changed tokens and
+	   hits, their own text kept for width but not drawn. */
+	.dv-s { position: relative; }
+	/* Spans too: changed tokens and hits color their own text, which drew it twice over the layer. */
+	.dv-s .dv-t, .dv-s .dv-t span { color: transparent; }
+	.dv-s > .sf-code {
+		position: absolute;
+		left: 0;
+		top: 0;
+		width: max-content;
+		min-width: 100%;
+		padding: 0;
+		border: 0;
+		border-radius: 0;
+		background: none;
+		box-shadow: none;
+		overflow: visible;
+		pointer-events: none;
+		font: inherit;
+	}
+	.dv-s > .sf-code :is(.sf-code-body, .sf-code-lines, .sf-ln, .sf-lt) {
+		margin: 0;
+		padding: 0;
+		background: none;
+	}
+	.dv-s > .sf-code .sf-ln { height: var(--sf-lh); line-height: var(--sf-lh); }
+	.dv-s > .sf-code .sf-lt { white-space: pre; tab-size: 4; }
+
+	/* A fold's or hidden hunk's text stays at the code column's left edge while it scrolls. */
+	.dv-ft { position: sticky; left: 0; display: inline-block; }
+
+	/* Backgrounds are colors (shade, tints) under the cursor's image, so a tinted row still shows
+	   the cursor. */
+	.dv-cur { background-image: linear-gradient(rgb(from var(--accent) r g b / 16%), rgb(from var(--accent) r g b / 16%)); }
+	.dv-g > .dv-cur, .dv-ga.dv-cur { box-shadow: inset 2px 0 0 var(--accent); }
+
+	.dv-mk {
+		color: var(--ok);
+		text-align: center;
+	}
+
+	.dv-ln {
+		padding-right: calc(var(--sf-cw) * 1);
+		text-align: right;
+		color: var(--t4);
+		background-color: var(--sf-shade);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.dv-ln2 {
+		box-shadow: inset 1px 0 0 var(--l2);
+	}
+
+	.dv-c {
+		tab-size: 4;
+	}
+
+	.dv-pad {
+		background-color: var(--sf-shade);
+	}
+
+	.dv-chg {
+		color: var(--t1);
+	}
+
+	.dv-o.dv-chg {
+		background-color: rgb(from var(--bad) r g b / 13%);
+	}
+
+	.dv-n.dv-chg {
+		background-color: rgb(from var(--ok) r g b / 9%);
+	}
+
+	.dv-o .dv-nov {
+		background: rgb(from var(--bad) r g b / 30%);
+	}
+
+	.dv-n .dv-nov {
+		background: rgb(from var(--ok) r g b / 30%);
+	}
+
+	.dv-hit {
+		background: rgb(from var(--warn) r g b / 45%);
+	}
+
+	.dv-hcur {
+		background: var(--warn);
+	}
+
+	.dv-hd {
+		color: var(--t1);
+		background-color: var(--sf-shade);
+		font-weight: 600;
+	}
+
+	.dv-path { color: var(--t1); }
+	.dv-dim { color: var(--t3); font-weight: 400; }
+	.dv-done { color: var(--ok); font-weight: 400; }
+	.dv-plus { color: var(--ok); font-weight: 400; }
+	.dv-minus { color: var(--bad); font-weight: 400; }
+	.dv-hits { color: var(--warn); font-weight: 400; }
+
+	.dv-fold, .dv-hidden, .dv-note {
+		padding-left: calc(var(--sf-cw) * 2);
+		color: var(--t4);
+	}
+
+	.dv-hidden { color: var(--ok); }
+
+	.dv-page {
+		padding-left: calc(var(--sf-cw) * 2);
+		color: var(--accent);
+		background-color: var(--sf-shade);
+	}
+
+	.dv-dl {
+		height: var(--sf-lh);
+		line-height: var(--sf-lh);
+		white-space: pre;
+		overflow: hidden;
+		padding: 0 calc(var(--sf-cw) * 1);
+		color: var(--t3);
+		background: var(--sf-shade);
+	}
+
+	.dv-dl2 { color: var(--t2); }
+
+	.dv-msg { padding: calc(var(--sf-cw) * 1) calc(var(--sf-cw) * 2); color: var(--t3); white-space: pre-wrap; }
+	.dv-error { color: var(--bad); }
+
+	.dv-help {
+		margin: calc(var(--sf-cw) * 2);
+		padding: calc(var(--sf-cw) * 1) calc(var(--sf-cw) * 2);
+		border-radius: 8px;
+		background: var(--card, var(--sf-shade));
+		box-shadow: inset 0 0 0 1px var(--l2);
+	}
+
+	.dv-help-l { white-space: pre; line-height: var(--sf-lh); }
+
+	/* The keys' sideways shift (host.luau key), both sides at once, on top of a swipe's: the
+	   grid carries .dv-x<place>-<digit> for each nonzero decimal digit of the shift in columns.
+	   Stencil has no inline styles, so a class per value is the only way to an arbitrary shift;
+	   seven places reach any line bin/dft accepts (2 MiB a side, a tab 4 columns: 8,388,608).
+	   A column is 0.6em, the advance of SF Mono, Menlo, Berkeley Mono, JetBrains Mono and most
+	   monospace fonts. Not --sf-cw: that is the terminal's cell, 7.76 px against SF Mono's 7.80 px
+	   at 13 px, which leaves `$` several columns short a thousand columns in. Stencil has no `ch`. */
+	.dv-t {
+		display: inline-block;
+	}
+
+	.dv-t, .dv-s > .sf-code {
+		margin-left: calc(-0.6em * (var(--dv-x6, 0) * 1000000 + var(--dv-x5, 0) * 100000 + var(--dv-x4, 0) * 10000 + var(--dv-x3, 0) * 1000 + var(--dv-x2, 0) * 100 + var(--dv-x1, 0) * 10 + var(--dv-x0, 0)));
+	}
+
+	.dv-x0-1 { --dv-x0: 1; } .dv-x0-2 { --dv-x0: 2; } .dv-x0-3 { --dv-x0: 3; } .dv-x0-4 { --dv-x0: 4; } .dv-x0-5 { --dv-x0: 5; } .dv-x0-6 { --dv-x0: 6; } .dv-x0-7 { --dv-x0: 7; } .dv-x0-8 { --dv-x0: 8; } .dv-x0-9 { --dv-x0: 9; }
+	.dv-x1-1 { --dv-x1: 1; } .dv-x1-2 { --dv-x1: 2; } .dv-x1-3 { --dv-x1: 3; } .dv-x1-4 { --dv-x1: 4; } .dv-x1-5 { --dv-x1: 5; } .dv-x1-6 { --dv-x1: 6; } .dv-x1-7 { --dv-x1: 7; } .dv-x1-8 { --dv-x1: 8; } .dv-x1-9 { --dv-x1: 9; }
+	.dv-x2-1 { --dv-x2: 1; } .dv-x2-2 { --dv-x2: 2; } .dv-x2-3 { --dv-x2: 3; } .dv-x2-4 { --dv-x2: 4; } .dv-x2-5 { --dv-x2: 5; } .dv-x2-6 { --dv-x2: 6; } .dv-x2-7 { --dv-x2: 7; } .dv-x2-8 { --dv-x2: 8; } .dv-x2-9 { --dv-x2: 9; }
+	.dv-x3-1 { --dv-x3: 1; } .dv-x3-2 { --dv-x3: 2; } .dv-x3-3 { --dv-x3: 3; } .dv-x3-4 { --dv-x3: 4; } .dv-x3-5 { --dv-x3: 5; } .dv-x3-6 { --dv-x3: 6; } .dv-x3-7 { --dv-x3: 7; } .dv-x3-8 { --dv-x3: 8; } .dv-x3-9 { --dv-x3: 9; }
+	.dv-x4-1 { --dv-x4: 1; } .dv-x4-2 { --dv-x4: 2; } .dv-x4-3 { --dv-x4: 3; } .dv-x4-4 { --dv-x4: 4; } .dv-x4-5 { --dv-x4: 5; } .dv-x4-6 { --dv-x4: 6; } .dv-x4-7 { --dv-x4: 7; } .dv-x4-8 { --dv-x4: 8; } .dv-x4-9 { --dv-x4: 9; }
+	.dv-x5-1 { --dv-x5: 1; } .dv-x5-2 { --dv-x5: 2; } .dv-x5-3 { --dv-x5: 3; } .dv-x5-4 { --dv-x5: 4; } .dv-x5-5 { --dv-x5: 5; } .dv-x5-6 { --dv-x5: 6; } .dv-x5-7 { --dv-x5: 7; } .dv-x5-8 { --dv-x5: 8; } .dv-x5-9 { --dv-x5: 9; }
+	.dv-x6-1 { --dv-x6: 1; } .dv-x6-2 { --dv-x6: 2; } .dv-x6-3 { --dv-x6: 3; } .dv-x6-4 { --dv-x6: 4; } .dv-x6-5 { --dv-x6: 5; } .dv-x6-6 { --dv-x6: 6; } .dv-x6-7 { --dv-x6: 7; } .dv-x6-8 { --dv-x6: 8; } .dv-x6-9 { --dv-x6: 9; }
+}

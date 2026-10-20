@@ -1,0 +1,342 @@
+#!/usr/bin/env bun
+// dft: structural diffs from difftastic, for git and jj.
+//
+// In a jj repository (colocated ones included) dft takes `jj diff` arguments:
+//   dft                       the working-copy change
+//   dft -r xyz                one revision
+//   dft -r 'trunk()..@'       a range (jj shows its combined diff)
+//   dft --from main --to @    any two revisions
+// In a git repository it takes `git diff` arguments:
+//   dft                       working tree vs HEAD, plus untracked files
+//   dft main...HEAD           anything `git diff` takes: --staged, -- path, …
+// DFT_VCS=git or DFT_VCS=jj overrides the detection.
+//
+//   dft --tab <args>          shows `dft <args>` in the viewer, a Tern block
+//                             in its own tab (reused on the next call from
+//                             the same pane)
+//
+// Without --tab dft prints difftastic's own colored diff.
+//
+// `dft --emit DIR <args>` is the viewer's input: DIR/meta.json, then one
+// DIR/records/NNNNNN.json per file (difftastic's JSON), the texts under
+// DIR/old/<path> and DIR/new/<path>, and DIR/done.json last. git calls this
+// script once per file as GIT_EXTERNAL_DIFF; jj calls it once with two folders
+// holding the changed files (`jj diff --tool`).
+
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
+
+// Set for helper runs (git's external diff, jj's diff tool): the emit folder.
+const EMIT_DIR = process.env.DFT_EMIT_DIR;
+// Per side; larger files are listed with a note.
+const MAX_FILE_BYTES = 2 * 1024 * 1024;
+
+// difftastic's limits. Each can be overridden with the environment variable of the same name.
+const env = (name: string, fallback: string) => process.env[name] || fallback;
+const BYTE_LIMIT = env("DFT_BYTE_LIMIT", String(MAX_FILE_BYTES));
+const PARSE_ERROR_LIMIT = env("DFT_PARSE_ERROR_LIMIT", "4");
+// A file that exceeds GRAPH_LIMIT is tried again at RETRY_GRAPH_LIMIT for up to RETRY_SECONDS.
+const GRAPH_LIMIT = env("DFT_GRAPH_LIMIT", "3000000");
+const RETRY_GRAPH_LIMIT = env("DFT_RETRY_GRAPH_LIMIT", "30000000");
+const RETRY_SECONDS = Number(env("DFT_RETRY_SECONDS", "20"));
+// Comma-separated `glob:language` pairs for difftastic's --override.
+const OVERRIDES = env("DFT_OVERRIDES", "*.uplc:Clojure,*.snap:text").split(",").filter(Boolean);
+
+type Record = {
+	path: string;
+	old_path?: string;
+	// git's view of the file, which difftastic's status can't give: it calls empty→text "created".
+	added?: true;
+	deleted?: true;
+	old_mode?: string;
+	new_mode?: string;
+	old?: string;
+	new?: string;
+	difft?: unknown;
+	note?: string;
+};
+
+type DifftFile = {
+	status?: string;
+	language?: unknown;
+	path?: string;
+	chunks?: { lhs?: { changes: { content?: string }[] }; rhs?: { changes: { content?: string }[] } }[][];
+};
+
+// Writes `text` to `file` whole: a reader polling for `file` never sees it half written.
+function writeWhole(file: string, text: string): void {
+	mkdirSync(path.dirname(file), { recursive: true });
+	const tmp = path.join(path.dirname(file), `.tmp-${process.pid}-${path.basename(file)}`);
+	writeFileSync(tmp, text);
+	renameSync(tmp, file);
+}
+
+// The record goes to DIR/records/NNNNNN.json, numbered in the order files arrive, and its texts to
+// DIR/old/<path> and DIR/new/<path>, replaced in the record by their line counts.
+function emit(dir: string, record: Record): void {
+	const counter = path.join(dir, "records", ".next");
+	const n = existsSync(counter) ? Number(readFileSync(counter, "utf8")) : 1;
+	const { old, new: neu, ...out } = record;
+	// A final newline ends the last line rather than starting another.
+	const lines = (text: string) => (text === "" ? 0 : text.split("\n").length - (text.endsWith("\n") ? 1 : 0));
+	const sides = out as typeof out & { has_old?: true; has_new?: true; old_lines?: number; new_lines?: number };
+	if (old !== undefined && !record.added) {
+		writeWhole(path.join(dir, "old", record.old_path ?? record.path), old);
+		sides.has_old = true;
+		sides.old_lines = lines(old);
+	}
+	if (neu !== undefined && !record.deleted) {
+		writeWhole(path.join(dir, "new", record.path), neu);
+		sides.has_new = true;
+		sides.new_lines = lines(neu);
+	}
+	writeWhole(path.join(dir, "records", `${String(n).padStart(6, "0")}.json`), JSON.stringify(out));
+	writeWhole(counter, String(n + 1));
+}
+
+// One file pair, as git hands it to an external diff (or as dft builds it for untracked files).
+function record(filePath: string, oldFile: string, newFile: string, extra: Partial<Record>): Record {
+	const base: Record = {
+		path: filePath,
+		...(oldFile === "/dev/null" ? { added: true } : {}),
+		...(newFile === "/dev/null" ? { deleted: true } : {}),
+		...extra,
+	};
+	try {
+		const texts: string[] = [];
+		for (const file of [oldFile, newFile]) {
+			if (file === "/dev/null") {
+				texts.push("");
+				continue;
+			}
+			const size = statSync(file).size;
+			if (size > MAX_FILE_BYTES) return { ...base, note: `too large to show (${Math.round(size / 1024)} KiB)` };
+			const bytes = readFileSync(file);
+			if (bytes.includes(0)) return { ...base, note: "binary file" };
+			try {
+				texts.push(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+			} catch {
+				return { ...base, note: "not UTF-8 text" };
+			}
+		}
+		const difft = (graphLimit: string, timeoutSeconds?: number): DifftFile | undefined => {
+			const args = ["--display", "json", "--color", "never", "--byte-limit", BYTE_LIMIT, "--parse-error-limit", PARSE_ERROR_LIMIT];
+			args.push("--graph-limit", graphLimit, ...OVERRIDES.map((o) => `--override=${o}`), oldFile, newFile);
+			const r = spawnSync("difft", args, {
+				encoding: "utf8",
+				env: { ...process.env, DFT_UNSTABLE: "yes" },
+				maxBuffer: 256 << 20,
+				timeout: timeoutSeconds ? timeoutSeconds * 1000 : undefined,
+			});
+			if (r.error && (r.error as NodeJS.ErrnoException).code === "ETIMEDOUT") return undefined;
+			if (r.error) throw new Error(`difft: ${r.error.message}`);
+			if (r.status !== 0) throw new Error(`difft exited ${r.status}: ${r.stderr.trim().split("\n")[0]}`);
+			return JSON.parse(r.stdout);
+		};
+		const gaveUp = (d: DifftFile) => typeof d.language === "string" && d.language.includes("DFT_GRAPH_LIMIT");
+		let d = difft(GRAPH_LIMIT);
+		if (!d) throw new Error("difft timed out");
+		if (gaveUp(d) && Number(RETRY_GRAPH_LIMIT) > Number(GRAPH_LIMIT)) {
+			const retry = difft(RETRY_GRAPH_LIMIT, RETRY_SECONDS);
+			if (retry && !gaveUp(retry)) d = retry;
+		}
+		// Say when a borrowed parser read the file, so a .uplc file doesn't just say "Clojure".
+		for (const o of OVERRIDES) {
+			const [glob, lang] = o.split(":");
+			const ext = glob.startsWith("*.") ? glob.slice(1) : undefined;
+			if (ext && lang && lang.toLowerCase() !== "text" && newFile.endsWith(ext) && typeof d.language === "string" && d.language.toLowerCase() === lang.toLowerCase()) {
+				d.language = `${ext.slice(1)} (${d.language} parser)`;
+			}
+		}
+		// Token text and difftastic's temporary paths: the viewer reads neither.
+		for (const chunk of d.chunks ?? []) {
+			for (const line of chunk) for (const c of [...(line.lhs?.changes ?? []), ...(line.rhs?.changes ?? [])]) delete c.content;
+		}
+		delete d.path;
+		return { ...base, old: texts[0], new: texts[1], difft: d };
+	} catch (err) {
+		return { ...base, note: err instanceof Error ? err.message : String(err) };
+	}
+}
+
+// Files under `dir`, as `/`-separated relative paths; symlinks are listed, not followed.
+function walk(dir: string, rel = ""): string[] {
+	const out: string[] = [];
+	for (const entry of readdirSync(path.join(dir, rel), { withFileTypes: true })) {
+		const name = rel ? `${rel}/${entry.name}` : entry.name;
+		if (entry.isDirectory()) out.push(...walk(dir, name));
+		else out.push(name);
+	}
+	return out;
+}
+
+function run(program: string, args: string[], options: { env?: NodeJS.ProcessEnv; inherit?: boolean } = {}) {
+	return spawnSync(program, args, {
+		encoding: "utf8",
+		env: options.env ?? process.env,
+		stdio: options.inherit ? ["ignore", "inherit", "inherit"] : ["ignore", "pipe", "pipe"],
+		maxBuffer: 64 << 20,
+	});
+}
+
+const argv = process.argv.slice(2);
+const script = process.argv[1];
+
+if (EMIT_DIR !== undefined && process.env.DFT_JJ === "1" && argv.length === 2) {
+	// `jj diff --tool`: two folders holding the changed files' old and new versions. A path is present
+	// on a side only if that side's walk lists it as a file or link: a directory replaced by a file of
+	// the same name (or the reverse) is the directory's files deleted (added) and the file added (deleted).
+	const [left, right] = argv;
+	const oldNames = new Set(walk(left));
+	const newNames = new Set(walk(right));
+	const modeOf = (file: string) => (statSync(file).mode & 0o111 ? "100755" : "100644");
+	const linkOf = (file: string) => (lstatSync(file).isSymbolicLink() ? readlinkSync(file) : null);
+	for (const name of [...new Set([...oldNames, ...newNames])].sort()) {
+		const oldFile = oldNames.has(name) ? path.join(left, name) : null;
+		const newFile = newNames.has(name) ? path.join(right, name) : null;
+		const flags = { ...(oldFile ? {} : { added: true as const }), ...(newFile ? {} : { deleted: true as const }) };
+		try {
+			const oldLink = oldFile ? linkOf(oldFile) : null;
+			const newLink = newFile ? linkOf(newFile) : null;
+			if (oldLink !== null || newLink !== null) {
+				const was = oldLink !== null ? `→ ${oldLink}` : oldFile ? "a file" : "";
+				const now = newLink !== null ? `→ ${newLink}` : newFile ? "a file" : "";
+				emit(EMIT_DIR, { path: name, ...flags, note: was && now ? `symlink: ${was}, now ${now}` : `symlink ${was || now}` });
+				continue;
+			}
+			const modes = oldFile && newFile && modeOf(oldFile) !== modeOf(newFile) ? { old_mode: modeOf(oldFile), new_mode: modeOf(newFile) } : {};
+			emit(EMIT_DIR, record(name, oldFile ?? "/dev/null", newFile ?? "/dev/null", modes));
+		} catch (err) {
+			emit(EMIT_DIR, { path: name, ...flags, note: err instanceof Error ? err.message : String(err) });
+		}
+	}
+	process.exit(0);
+}
+
+if (EMIT_DIR !== undefined && (argv.length === 1 || argv.length >= 7)) {
+	// GIT_EXTERNAL_DIFF: path old-file old-hex old-mode new-file new-hex new-mode [new-path xfrm-msg].
+	if (argv.length < 7) {
+		emit(EMIT_DIR, { path: argv[0] ?? "?", note: "unmerged: resolve the conflict first" });
+	} else {
+		const [name, oldFile, , oldMode, newFile, , newMode, newPath] = argv;
+		const renamed = newPath !== undefined && newPath !== name;
+		const modes = oldMode !== newMode && oldFile !== "/dev/null" && newFile !== "/dev/null" ? { old_mode: oldMode, new_mode: newMode } : {};
+		emit(EMIT_DIR, record(renamed ? newPath : name, oldFile, newFile, { ...(renamed ? { old_path: name } : {}), ...modes }));
+	}
+	process.exit(0);
+}
+
+if (argv[0] === "-h" || argv[0] === "--help") {
+	// The header comment is the usage.
+	const usage = readFileSync(script, "utf8").split("\n").slice(1, 19);
+	writeSync(1, `${usage.map((l) => l.replace(/^\/\/ ?/, "")).join("\n")}\n`);
+	process.exit(0);
+}
+
+if (argv[0] === "--tab") {
+	// dft writes the request to <tmp>/dft-view/<pane>-<socket hash>.dftview. With no viewer open for
+	// this pane, `tern open` hands the request to the plugin's route, which opens the block. An open
+	// viewer writes a heartbeat (the same name, .block) every 250 ms; then the request names that
+	// block, which loads it, and dft focuses it.
+	// A window that runs its panes without a daemon (`tern serve`, say) sets TERN_WINDOW_PANE instead.
+	const pane = process.env.TERN_PANE ?? process.env.TERN_WINDOW_PANE;
+	if (!pane) {
+		process.stderr.write("dft --tab: run it inside a Tern pane\n");
+		process.exit(1);
+	}
+	const dir = path.join(tmpdir(), "dft-view");
+	mkdirSync(dir, { recursive: true });
+	// Requests and heartbeats of panes long gone.
+	for (const name of readdirSync(dir)) {
+		const file = path.join(dir, name);
+		try {
+			if (/\.(dftview|block)$/.test(name) && Date.now() - statSync(file).mtimeMs > 24 * 3600 * 1000) rmSync(file, { force: true });
+		} catch {
+			// Another dft swept it first.
+		}
+	}
+	// Pane ids are per session daemon (or per daemonless window), so the socket scopes them.
+	const scope = createHash("sha1").update(process.env.TERN_PANE_SOCKET ?? process.env.TERN_WINDOW_SOCKET ?? "").digest("hex").slice(0, 8);
+	const id = `${pane}-${scope}`;
+	const request = path.join(dir, `${id}.dftview`);
+	const ask = (block: number | null) => writeWhole(request, JSON.stringify({ cwd: process.cwd(), args: argv.slice(1), seq: Date.now(), block }));
+	let block: number | undefined;
+	try {
+		// The viewer counts as open while its heartbeat is at most 3 s old.
+		const beat = JSON.parse(readFileSync(path.join(dir, `${id}.block`), "utf8"));
+		if (typeof beat.at === "number" && Date.now() / 1000 - beat.at <= 3 && typeof beat.pane === "number") block = beat.pane;
+	} catch {
+		// No viewer has run for this pane.
+	}
+	if (block !== undefined) {
+		ask(block);
+		// The heartbeat can outlive its block by a few seconds, and without a daemon (`tern serve`)
+		// `tern focus` can't reach it: then open anew.
+		if (run("tern", ["focus", String(block)]).status === 0) process.exit(0);
+	}
+	ask(null);
+	const r = run("tern", ["open", "--tab", request]);
+	if (r.status !== 0) process.stderr.write(r.stderr || r.stdout);
+	process.exit(r.status ?? 1);
+}
+
+const vcs = process.env.DFT_VCS ?? (run("jj", ["root"]).status === 0 ? "jj" : "git");
+
+if (argv[0] !== "--emit" || !argv[1]) {
+	// difftastic reads its limits from these variables; no retry or overrides here.
+	const limits = { ...process.env, DFT_BYTE_LIMIT: BYTE_LIMIT, DFT_PARSE_ERROR_LIMIT: PARSE_ERROR_LIMIT, DFT_GRAPH_LIMIT: GRAPH_LIMIT };
+	const r =
+		vcs === "jj"
+			? run("jj", ["diff", "--tool", "difft", ...argv], { inherit: true, env: limits })
+			: run("git", ["-c", "diff.external=difft", "diff", "--ext-diff", ...(argv.length ? argv : ["HEAD"])], { inherit: true, env: limits });
+	process.exit(r.status ?? 1);
+}
+
+const emitDir = path.resolve(argv[1]);
+const args = argv.slice(2);
+let status = 1;
+// jj's and git's own messages, which the viewer shows.
+let messages = "";
+try {
+	const root = vcs === "jj" ? run("jj", ["root"]) : run("git", ["rev-parse", "--show-toplevel"]);
+	status = root.status ?? 1;
+	messages = root.stderr;
+	if (status === 0) {
+		const top = root.stdout.trim();
+		// The viewer resolves the records' repository-relative paths against this.
+		writeWhole(path.join(emitDir, "meta.json"), JSON.stringify({ root: top }));
+		const helperEnv = { ...process.env, DFT_EMIT_DIR: emitDir };
+		let r;
+		if (vcs === "jj") {
+			// `--tool` goes before the user's arguments: after a `--` it would read as a path.
+			const tool = ["--config", `merge-tools.dft.program=${JSON.stringify(script)}`, "--config", 'merge-tools.dft.diff-args=["$left","$right"]'];
+			r = run("jj", ["--no-pager", "--color=never", ...tool, "diff", "--tool", "dft", ...args], { env: { ...helperEnv, DFT_JJ: "1" } });
+		} else {
+			r = run("git", ["--no-pager", "diff", "--ext-diff", "--no-color", ...(args.length ? args : ["HEAD"])], { env: { ...helperEnv, GIT_EXTERNAL_DIFF: script } });
+		}
+		messages = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+		status = r.status ?? 1;
+		if (vcs === "git" && status === 0 && args.length === 0) {
+			// Untracked entries, which dft reads itself. git stores a symlink as its target text and lists
+			// a nested repository as `dir/`; neither may be read through.
+			const listed = run("git", ["-C", top, "ls-files", "--others", "--exclude-standard", "-z"]);
+			for (const name of listed.stdout.split("\0").filter(Boolean)) {
+				const full = path.join(top, name);
+				try {
+					const st = lstatSync(full);
+					if (st.isSymbolicLink()) emit(emitDir, { path: name, added: true, note: `symlink → ${readlinkSync(full)}` });
+					else if (!st.isFile()) emit(emitDir, { path: name, added: true, note: "untracked directory (a nested repository); not shown" });
+					else emit(emitDir, record(name, "/dev/null", full, {}));
+				} catch (err) {
+					emit(emitDir, { path: name, added: true, note: err instanceof Error ? err.message : String(err) });
+				}
+			}
+		}
+	}
+} finally {
+	writeWhole(path.join(emitDir, "done.json"), JSON.stringify({ status, messages: messages.trim() }));
+}
+process.exit(status);

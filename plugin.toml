@@ -1,0 +1,16 @@
+schema = 1
+id = "dft-viewer"
+name = "dft viewer"
+version = "0.1.0"
+description = "difftastic's structural diffs of jj and git changes in a block, for reviewing: search, and seen and reviewed hunks that survive rebases."
+icon = "git-branch"
+host = "host.luau"
+window = "window.luau"
+styles = ["viewer.css"]
+
+[[blocks]]
+id = "diff"
+title = "dft"
+icon = "git-branch"
+# Opened by `dft --tab` through the window's route for .dftview files.
+palette = false
