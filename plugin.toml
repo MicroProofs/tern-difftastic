@@ -1,7 +1,7 @@
 schema = 1
 id = "dft-viewer"
 name = "dft viewer"
-version = "0.1.1"
+version = "0.1.2"
 description = "difftastic's structural diffs of jj and git changes in a block, for reviewing: search, and seen and reviewed hunks that survive rebases."
 icon = "git-branch"
 host = "host.luau"

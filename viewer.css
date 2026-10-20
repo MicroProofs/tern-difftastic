@@ -40,18 +40,19 @@
 	.dv-ga { display: grid; grid-template-columns: calc(var(--sf-cw) * 2) 1fr; }
 	.dv-fu .dv-ga { grid-template-columns: calc(var(--sf-cw) * 2) 1fr 1fr; }
 
-	/* A code column scrolls sideways on its own (a trackpad swipe or shift-wheel over it). Each
-	   piece is as wide as its line and at least the column, so a tint runs under its whole line.
-	   The border keeps a 1-column gap after the line numbers: overflow clips inside it. */
+	/* A code column scrolls sideways on its own (a trackpad swipe or shift-wheel over it). It is a
+	   one-track grid as wide as its longest line and at least the column, and every piece stretches
+	   to that track, so tints, the cursor and padding run the whole scrolled width. The border keeps
+	   a 1-column gap after the line numbers: overflow clips inside it. */
 	.dv-s {
+		display: grid;
+		grid-template-columns: minmax(max-content, auto);
 		min-width: 0;
 		overflow-x: auto;
 		overflow-y: hidden;
 		border-left: calc(var(--sf-cw) * 1) solid transparent;
 		scrollbar-width: thin;
 	}
-
-	.dv-s > .dv-r { width: max-content; min-width: 100%; }
 
 	/* Syntax colors: Tern's code node lies over each code column, a line per row (host.luau
 	   view), its box stripped to the lines; the pieces under it draw tints, changed tokens and
