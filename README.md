@@ -7,6 +7,8 @@ highlighted and Tern's own syntax colors underneath. Search covers both whole si
 every hunk is unseen, seen or reviewed, keyed by its content so the marks survive `jj rebase`, and
 the dock shows the blame of the line under the cursor.
 
+![The viewer on a change to its own host.luau: removed lines left, added right, changed tokens highlighted, unchanged code folded, and the cursor line's blame in the dock](docs/screenshot.png)
+
 ## Requirements
 
 `difft` (`brew install difftastic`), `bun`, `rg`, and `jj` or `git`.
