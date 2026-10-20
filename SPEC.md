@@ -13,7 +13,7 @@ and the dock counts all three.
 - **Reviewed**: `R` toggles the hunk at the cursor, `r` every hunk of the file.
 - A mark is keyed by the hunk's new path and lines (not line numbers), so it survives `jj rebase`,
   `squash` and `describe`. A changed line makes the hunk unseen again. `u` hides marked hunks.
-- Marks are kept per repository root in the plugin's data folder.
+- Marks are kept per repository root in the plugin's key/value store.
 
 ## Search
 
@@ -26,6 +26,13 @@ and the dock counts all three.
 - The dock shows the count as `3/17`. A fold row says how many hits it holds; `n`/`N` to such a hit
   unfolds 3 lines around it. A hit in a collapsed file expands it, and a hit in a hunk hidden by `u`
   shows that hunk.
+
+## Blame
+
+Once the diff has loaded, the dock's second line shows who last changed the cursor's line: the
+change or commit id, author, date and first line of the description. A row with a new-side line is
+blamed at the diff's new revision, an old-only row at its old revision (`jj file annotate` or
+`git blame`). Lines of the working tree or index say `not committed yet`.
 
 ## Drawing
 

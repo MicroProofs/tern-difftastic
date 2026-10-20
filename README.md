@@ -4,7 +4,8 @@ A [Tern](https://docs.stencil.so/tern/) plugin that shows [difftastic](https://g
 structural diffs of jj and git changes in a block, for reviewing. Removed lines are on the left and
 added lines on the right, aligned the way difftastic aligns them, with the tokens it found changed
 highlighted and Tern's own syntax colors underneath. Search covers both whole sides of every file,
-and every hunk is unseen, seen or reviewed, keyed by its content so the marks survive `jj rebase`.
+every hunk is unseen, seen or reviewed, keyed by its content so the marks survive `jj rebase`, and
+the dock shows the blame of the line under the cursor.
 
 ## Requirements
 

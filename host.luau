@@ -27,6 +27,8 @@ local RENDER_EVERY_MS = 150
 local SEEN_MS = 1000
 -- The search reruns this long after typing stops.
 local SEARCH_DELAY_MS = 150
+-- The blame of the cursor's line is fetched this long after the cursor stops.
+local BLAME_DELAY_MS = 150
 -- The request file is checked (and the heartbeat written) this often.
 local REQUEST_POLL_MS = 250
 -- Texts kept split into lines (estimated bytes).
@@ -145,12 +147,11 @@ type Layout = {
 type Hide = (f: File, hunk: number) -> boolean
 
 -- Hunk marks per repository: hunk key -> "s" (seen, automatic) or "r"
--- (reviewed, explicit). Kept in <plugin data>/marks/<hash of root>.json. A
--- save rereads the file and applies only the keys this pane changed, so two
--- panes on one repository keep each other's marks.
+-- (reviewed, explicit). Kept in tern.kv under "marks:<hash of root>" as that
+-- map. A save rereads the stored map and applies only the keys this pane
+-- changed, so two panes on one repository keep each other's marks.
 type Marks = {
-	path: string,
-	root: string,
+	key: string,
 	map: { [string]: string },
 	-- Keys this pane changed since the last save.
 	changed: { [string]: boolean },
@@ -231,6 +232,11 @@ type SearchState = {
 
 type CacheEntry = { sig: string, nodes: { Node }, lines: { string }? }
 
+-- `dft --blame` for one side of one file: file id, side (1 old, 2 new), then its `commits`
+-- ([id, author, date, summary]) and per line the index (0-based) of the commit that last
+-- changed it, or `error` (those two empty).
+type Blame = { f: number, side: number, commits: { { string } }, lines: { any }, error: string? }
+
 type State = {
 	cx: BlockCx,
 	pane: number,
@@ -265,6 +271,13 @@ type State = {
 	cached: number,
 	-- The pending "seen" timer: any key or event cancels it.
 	seen: TimerHandle?,
+	-- The one cached blame (the file side the cursor is on or was last on), the timer that
+	-- fetches the next one, and a counter that drops results of fetches since replaced.
+	blame: Blame?,
+	blameTimer: TimerHandle?,
+	blameSeq: number,
+	-- Dock line 2 as last drawn when no prompt or message owned it: it stays while a blame loads.
+	line2: string?,
 	lastRender: number,
 	renderDue: boolean,
 	saveDue: boolean,
@@ -585,11 +598,15 @@ local function lineText(s: State, f: File, side: number, line: number): string
 	return lines[line] or ""
 end
 
-local function readMarks(path: string): { [string]: string }
-	local data = readJson(path)
+-- The marks stored under `key`; nil when the store can't be read (no key is no marks).
+local function readMarks(key: string): { [string]: string }?
+	local ok, data = pcall(tern.kv.get, key)
+	if not ok then
+		return nil
+	end
 	local out: { [string]: string } = {}
-	if type(data) == "table" and type(data.marks) == "table" then
-		for k, v in data.marks do
+	if type(data) == "table" then
+		for k, v in data do
 			if type(k) == "string" and (v == "s" or v == "r") then
 				out[k] = v
 			end
@@ -603,13 +620,16 @@ local function saveMarks(s: State)
 	if m == nil or not m.dirty then
 		return
 	end
-	local disk = readMarks(m.path)
-	for k in m.changed do
-		disk[k] = m.map[k]
+	-- An unreadable store stays dirty: writing over it would drop other panes' marks.
+	local stored = readMarks(m.key)
+	if stored == nil then
+		return
 	end
-	tern.fs.mkdir(tern.plugin.data .. "/marks")
-	tern.fs.write(m.path, tern.json.encode({ root = m.root, marks = disk }))
-	m.map = disk
+	for k in m.changed do
+		stored[k] = m.map[k]
+	end
+	tern.kv.set(m.key, if next(stored) then stored else nil)
+	m.map = stored
 	m.changed = {}
 	m.dirty = false
 end
@@ -1193,6 +1213,27 @@ local function counts(s: State): (number, number, number, number)
 	return unseen, seen, reviewed, total
 end
 
+-- The file, side (1 old, 2 new) and 1-based line the cursor's row shows: the new side's line
+-- when the row has one, else the old side's. A row without a line (header, note, fold,
+-- hidden hunk) gives nil.
+local function cursorLine(s: State): (File?, number, number)
+	if s.total == 0 then
+		return nil, 0, 0
+	end
+	local li, r = locate(s.starts, s.cur)
+	local l = s.layouts[li]
+	if l.kind[r] ~= PAIR then
+		return nil, 0, 0
+	end
+	local f, i = l.file, l.a[r]
+	local oldLine, newLine = oldAt(f, i), newAt(f, i)
+	-- A unified row shows one side of a changed pair (Layout `b`); 0 shows both.
+	if l.b[r] == 2 or (l.b[r] == 0 and newLine > 0) then
+		return f, 2, newLine
+	end
+	return f, 1, oldLine
+end
+
 local function dockNode(s: State): Node
 	local unseen, seen, reviewed, total = counts(s)
 	local status = string.format("%s · hunks: %d unseen · %d seen • · %d reviewed ✓ of %d", plural(#s.layouts, "file", "files"), unseen, seen, reviewed, total)
@@ -1232,8 +1273,30 @@ local function dockNode(s: State): Node
 		end
 	elseif s.search.error then
 		line2 = s.search.error
+	elseif s.message then
+		line2 = s.message
 	else
-		line2 = s.message or "? keys · ]/[ hunks · }/{ files · / search · R/r reviewed · u unmarked only · Enter open"
+		line2 = "? keys · ]/[ hunks · }/{ files · / search · R/r reviewed · u unmarked only · Enter open"
+		local f, side, line = cursorLine(s)
+		if f and not s.loading then
+			local b = s.blame
+			if b == nil or b.f ~= f.id or b.side ~= side then
+				line2 = s.line2 or line2
+			elseif b.error then
+				line2 = "blame: " .. b.error
+			else
+				local at = b.lines[line]
+				local c = if type(at) == "number" then b.commits[at + 1] else nil
+				if c == nil then
+					line2 = "blame: no commit for line " .. line
+				elseif c[1] == "" then
+					line2 = c[2]
+				else
+					line2 = string.format("%s  %s  %s  %s", c[1], c[2], c[3], if c[4] == "" then "(no description)" else c[4])
+				end
+			end
+		end
+		s.line2 = line2
 	end
 	return ui.col({
 		ui.el("div", { key = "status", class = "dv-dl", text = status }),
@@ -1290,6 +1353,45 @@ local function scheduleSeen(s: State)
 			markHunk(s, l.file, h, "s")
 			render(s)
 		end
+	end)
+end
+
+-- Arms the timer that fetches the blame of the file side the cursor is on. Only one result is
+-- kept, so moving inside a file side fetches nothing. Never while loading: dft writes the
+-- revisions it blames only when the diff is done.
+local function scheduleBlame(s: State)
+	if s.blameTimer then
+		s.blameTimer:cancel()
+	end
+	s.blameTimer = tern.timer(BLAME_DELAY_MS, function()
+		local f, side = cursorLine(s)
+		local dir, root = s.dir, s.root
+		if s.dead or s.loading or s.failed or f == nil or dir == nil or root == nil then
+			return
+		end
+		local b = s.blame
+		if b and b.f == f.id and b.side == side then
+			return
+		end
+		s.blameSeq += 1
+		local seq = s.blameSeq
+		local argv = { BUN, DFT, "--blame", dir, if side == 1 then "old" else "new", if side == 1 then (f.oldPath or f.path) else f.path }
+		tern.process.run(argv, { cwd = root, env = { PATH = PATH }, timeout_ms = 20000 }, function(r: ProcessResult)
+			if s.dead or s.blameSeq ~= seq then
+				return
+			end
+			local entry: Blame = { f = f.id, side = side, commits = {}, lines = {}, error = nil }
+			local ok, data = pcall(tern.json.decode, r.stdout)
+			if ok and type(data) == "table" and r.status == 0 and type(data.commits) == "table" and type(data.lines) == "table" then
+				entry.commits, entry.lines = data.commits, data.lines
+			elseif ok and type(data) == "table" and type(data.error) == "string" then
+				entry.error = data.error
+			else
+				entry.error = string.match(r.stderr, "[^\n]+") or string.format("dft exited %d", r.status)
+			end
+			s.blame = entry
+			render(s)
+		end)
 	end)
 end
 
@@ -1719,8 +1821,8 @@ local function tick(s: State, run: number)
 		local meta = readJson(dir .. "/meta.json")
 		if type(meta) == "table" and type(meta.root) == "string" then
 			s.root = meta.root
-			local path = tern.plugin.data .. "/marks/" .. hash(meta.root) .. ".json"
-			s.marks = { path = path, root = meta.root, map = readMarks(path), changed = {}, dirty = false }
+			local key = "marks:" .. hash(meta.root)
+			s.marks = { key = key, map = readMarks(key) or {}, changed = {}, dirty = false }
 		end
 	end
 	local added = 0
@@ -1757,6 +1859,7 @@ local function tick(s: State, run: number)
 		metric("loaded", { ms = tern.now() - s.t0, files = #s.layouts, rows = s.total, pages = #s.pages, hunks = hunks, mem = memKB(s), peak = s.peak, args = if s.req then s.req.args else nil })
 		render(s)
 		scheduleSeen(s)
+		scheduleBlame(s)
 		-- A search typed while files arrived reruns over all of them.
 		if s.search.text ~= "" then
 			searchSoon(s)
@@ -1802,6 +1905,10 @@ local function startLoad(s: State)
 	s.nextRec, s.loading, s.failed, s.messages, s.leftOut = 1, false, nil, nil, 0
 	s.cur, s.hx = 1, 0
 	s.marks = nil
+	s.blame, s.blameSeq, s.line2 = nil, s.blameSeq + 1, nil
+	if s.blameTimer then
+		s.blameTimer:cancel()
+	end
 	s.texts.entries, s.texts.cost = {}, 0
 	s.pairIndex = {}
 	s.search = { hits = nil, cur = 0, at = 0, seq = s.search.seq + 1, text = "", sides = "both", error = nil, jump = false, from = 1, gen = s.search.gen + 1 }
@@ -1937,6 +2044,10 @@ local viewer: BlockDef<State> = {
 			cache = {},
 			cached = 0,
 			seen = nil,
+			blame = nil,
+			blameTimer = nil,
+			blameSeq = 0,
+			line2 = nil,
 			lastRender = 0,
 			renderDue = false,
 			saveDue = false,
@@ -2389,6 +2500,7 @@ local viewer: BlockDef<State> = {
 		end
 		if handled then
 			scheduleSeen(s)
+			scheduleBlame(s)
 		end
 		metric("key", { key = k.text or k.name, ms = tern.now() - t0, handled = handled, mem = memKB(s) })
 		return handled
@@ -2405,6 +2517,7 @@ local viewer: BlockDef<State> = {
 			if pageJump(s, if ev.value == "next" then 1 else -1) then
 				s.cx:render()
 				scheduleSeen(s)
+				scheduleBlame(s)
 			end
 			return
 		elseif ev.act ~= "row" then
@@ -2422,6 +2535,7 @@ local viewer: BlockDef<State> = {
 			end
 		end
 		scheduleSeen(s)
+		scheduleBlame(s)
 	end,
 
 	save = function(s: State): any

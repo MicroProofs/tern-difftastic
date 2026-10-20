@@ -283,6 +283,56 @@ if (argv[0] === "--tab") {
 	process.exit(r.status ?? 1);
 }
 
+if (argv[0] === "--blame" && argv.length === 4) {
+	// `dft --blame DIR old|new PATH`, run in the repository root: who last changed each line of one
+	// side of a file in the diff `dft --emit DIR` wrote, as {commits: [[id, author, date, summary]],
+	// lines: [index into commits, per line]}, or {error}.
+	const [, dir, side, file] = argv;
+	const meta = JSON.parse(readFileSync(path.join(dir, "meta.json"), "utf8"));
+	const rev: string | null = side === "old" ? meta.old : meta.new;
+	const commits: string[][] = [];
+	const lines: number[] = [];
+	const seen = new Map<string, number>();
+	let r;
+	if (meta.vcs === "jj" && rev) {
+		const template = 'commit.change_id().shortest(8) ++ "\\x1f" ++ commit.author().name() ++ "\\x1f" ++ commit.author().timestamp().format("%Y-%m-%d") ++ "\\x1f" ++ commit.description().first_line() ++ "\\n"';
+		r = run("jj", ["--ignore-working-copy", "--no-pager", "file", "annotate", "-r", rev, "-T", template, file]);
+		if (r.status === 0) {
+			for (const line of r.stdout.split("\n").slice(0, -1)) {
+				const entry = line.split("\x1f");
+				if (!seen.has(entry[0])) seen.set(entry[0], commits.push(entry) - 1);
+				lines.push(seen.get(entry[0])!);
+			}
+		}
+	} else if (meta.vcs === "git" && (rev || (side === "new" && meta.contents))) {
+		// The working tree or index side is the text dft emitted, blamed from HEAD.
+		const from = rev ? [rev] : ["--contents", path.join(dir, "new", file), "HEAD"];
+		r = run("git", ["blame", "--porcelain", ...from, "--", file]);
+		if (r.status === 0) {
+			// Porcelain: a `<sha> <orig line> <final line> …` header per line, the commit's fields the
+			// first time it appears, then the line's text after a tab.
+			const info = new Map<string, string[]>();
+			let sha = "";
+			for (const line of r.stdout.split("\n")) {
+				const header = /^([0-9a-f]{40}) \d+ (\d+)/.exec(line);
+				if (header) {
+					sha = header[1];
+					// The all-zero id is a line of the working tree or index text.
+					if (!info.has(sha)) info.set(sha, /^0+$/.test(sha) ? ["", "not committed yet", "", ""] : [sha.slice(0, 8), "", "", ""]);
+					if (!seen.has(sha)) seen.set(sha, commits.push(info.get(sha)!) - 1);
+					lines[Number(header[2]) - 1] = seen.get(sha)!;
+				} else if (/^0+$/.test(sha)) continue;
+				else if (line.startsWith("author ")) info.get(sha)![1] = line.slice(7);
+				else if (line.startsWith("author-time ")) info.get(sha)![2] = new Date(Number(line.slice(12)) * 1000).toISOString().slice(0, 10);
+				else if (line.startsWith("summary ")) info.get(sha)![3] = line.slice(8);
+			}
+		}
+	}
+	const error = !r ? "no revision to blame" : r.status !== 0 ? (r.stderr.trim().split("\n")[0] ?? `exit ${r.status}`) : undefined;
+	writeSync(1, JSON.stringify(error ? { error } : { commits, lines }));
+	process.exit(error ? 1 : 0);
+}
+
 const vcs = process.env.DFT_VCS ?? (run("jj", ["root"]).status === 0 ? "jj" : "git");
 
 if (argv[0] !== "--emit" || !argv[1]) {
@@ -307,7 +357,8 @@ try {
 	if (status === 0) {
 		const top = root.stdout.trim();
 		// The viewer resolves the records' repository-relative paths against this.
-		writeWhole(path.join(emitDir, "meta.json"), JSON.stringify({ root: top }));
+		const meta = path.join(emitDir, "meta.json");
+		writeWhole(meta, JSON.stringify({ root: top }));
 		const helperEnv = { ...process.env, DFT_EMIT_DIR: emitDir };
 		let r;
 		if (vcs === "jj") {
@@ -337,6 +388,59 @@ try {
 				}
 			}
 		}
+		// The revisions each side shows, for `dft --blame`. Written after the diff, so it costs the
+		// viewer's first rows nothing; null when there is no single revision to blame.
+		const values = (names: string[]) => {
+			const out: string[] = [];
+			for (let i = 0; i < args.length && args[i] !== "--"; i++) {
+				const a = args[i];
+				const n = names.find((n) => a === n || a.startsWith(`${n}=`) || (n.length === 2 && a.startsWith(n)));
+				if (n === undefined) continue;
+				if (a === n) out.push(args[++i]);
+				else out.push(a.startsWith(`${n}=`) ? a.slice(n.length + 1) : a.slice(2));
+			}
+			return out;
+		};
+		let old: string | null = null;
+		let neu: string | null = null;
+		let contents = false;
+		if (vcs === "jj") {
+			const one = (revset: string) => {
+				const ids = run("jj", ["--ignore-working-copy", "log", "--no-graph", "-r", revset, "-T", 'commit_id ++ "\\n"']).stdout?.split("\n").filter(Boolean) ?? [];
+				return ids.length === 1 ? ids[0] : null;
+			};
+			const from = values(["--from", "-f"]);
+			const to = values(["--to", "-t"]);
+			const set = values(["--revisions", "--revision", "-r"]).map((r) => `(${r})`).join("|") || "@";
+			old = from.length || to.length ? one(from[0] ?? "@") : one(`roots(${set})-`);
+			neu = from.length || to.length ? one(to[0] ?? "@") : one(`heads(${set})`);
+		} else {
+			const sha = (rev: string) => {
+				const r = run("git", ["rev-parse", "--verify", "--quiet", `${rev || "HEAD"}^{commit}`]);
+				return r.status === 0 ? r.stdout.trim() : null;
+			};
+			// git takes revisions before `--`, and paths too when they don't name a revision.
+			const end = args.indexOf("--");
+			const revs = (end < 0 ? args : args.slice(0, end)).filter((a) => !a.startsWith("-") && (a.includes("..") || sha(a)));
+			if (revs.length === 1 && revs[0].includes("...")) {
+				const [a, b] = revs[0].split("...");
+				const base = run("git", ["merge-base", a || "HEAD", b || "HEAD"]);
+				old = base.status === 0 ? base.stdout.trim() : null;
+				neu = sha(b);
+			} else if (revs.length === 1 && revs[0].includes("..")) {
+				const [a, b] = revs[0].split("..");
+				old = sha(a);
+				neu = sha(b);
+			} else if (revs.length === 2) {
+				old = sha(revs[0]);
+				neu = sha(revs[1]);
+			} else {
+				// Against the working tree, or the index with --staged.
+				old = sha(revs[0] ?? "HEAD");
+				contents = true;
+			}
+		}
+		writeWhole(meta, JSON.stringify({ root: top, vcs, old, new: neu, contents }));
 	}
 } finally {
 	writeWhole(path.join(emitDir, "done.json"), JSON.stringify({ status, messages: messages.trim() }));
