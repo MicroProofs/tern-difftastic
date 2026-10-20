@@ -305,8 +305,8 @@ if (argv[0] === "--blame" && argv.length === 4) {
 			}
 		}
 	} else if (meta.vcs === "git" && (rev || (side === "new" && meta.contents))) {
-		// The working tree or index side is the text dft emitted, blamed from HEAD.
-		const from = rev ? [rev] : ["--contents", path.join(dir, "new", file), "HEAD"];
+		// The working tree or index side is the text dft emitted, blamed from the HEAD it was diffed against.
+		const from = rev ? [rev] : ["--contents", path.join(dir, "new", file), meta.contents];
 		r = run("git", ["blame", "--porcelain", ...from, "--", file]);
 		if (r.status === 0) {
 			// Porcelain: a `<sha> <orig line> <final line> …` header per line, the commit's fields the
@@ -361,6 +361,12 @@ try {
 		writeWhole(meta, JSON.stringify({ root: top }));
 		const helperEnv = { ...process.env, DFT_EMIT_DIR: emitDir };
 		let r;
+		// git: HEAD as of this diff, so blame attributes the captured text the same after a checkout.
+		const sha = (rev: string) => {
+			const p = run("git", ["rev-parse", "--verify", "--quiet", `${rev}^{commit}`]);
+			return p.status === 0 ? p.stdout.trim() : null;
+		};
+		const head = vcs === "git" ? sha("HEAD") : null;
 		if (vcs === "jj") {
 			// `--tool` goes before the user's arguments: after a `--` it would read as a path.
 			const tool = ["--config", `merge-tools.dft.program=${JSON.stringify(script)}`, "--config", 'merge-tools.dft.diff-args=["$left","$right"]'];
@@ -368,7 +374,7 @@ try {
 		} else {
 			// git runs GIT_EXTERNAL_DIFF through the shell, and installed plugins live under "Application Support".
 			const quoted = `'${script.replace(/'/g, `'\\''`)}'`;
-			r = run("git", ["--no-pager", "diff", "--ext-diff", "--no-color", ...(args.length ? args : ["HEAD"])], { env: { ...helperEnv, GIT_EXTERNAL_DIFF: quoted } });
+			r = run("git", ["--no-pager", "diff", "--ext-diff", "--no-color", ...(args.length ? args : [head ?? "HEAD"])], { env: { ...helperEnv, GIT_EXTERNAL_DIFF: quoted } });
 		}
 		messages = `${r.stdout ?? ""}${r.stderr ?? ""}`;
 		status = r.status ?? 1;
@@ -403,7 +409,7 @@ try {
 		};
 		let old: string | null = null;
 		let neu: string | null = null;
-		let contents = false;
+		let contents: string | null = null;
 		if (vcs === "jj") {
 			const one = (revset: string) => {
 				const ids = run("jj", ["--ignore-working-copy", "log", "--no-graph", "-r", revset, "-T", 'commit_id ++ "\\n"']).stdout?.split("\n").filter(Boolean) ?? [];
@@ -415,29 +421,25 @@ try {
 			old = from.length || to.length ? one(from[0] ?? "@") : one(`roots(${set})-`);
 			neu = from.length || to.length ? one(to[0] ?? "@") : one(`heads(${set})`);
 		} else {
-			const sha = (rev: string) => {
-				const r = run("git", ["rev-parse", "--verify", "--quiet", `${rev || "HEAD"}^{commit}`]);
-				return r.status === 0 ? r.stdout.trim() : null;
-			};
 			// git takes revisions before `--`, and paths too when they don't name a revision.
 			const end = args.indexOf("--");
 			const revs = (end < 0 ? args : args.slice(0, end)).filter((a) => !a.startsWith("-") && (a.includes("..") || sha(a)));
 			if (revs.length === 1 && revs[0].includes("...")) {
 				const [a, b] = revs[0].split("...");
-				const base = run("git", ["merge-base", a || "HEAD", b || "HEAD"]);
+				const base = run("git", ["merge-base", a || head || "HEAD", b || head || "HEAD"]);
 				old = base.status === 0 ? base.stdout.trim() : null;
-				neu = sha(b);
+				neu = b ? sha(b) : head;
 			} else if (revs.length === 1 && revs[0].includes("..")) {
 				const [a, b] = revs[0].split("..");
-				old = sha(a);
-				neu = sha(b);
+				old = a ? sha(a) : head;
+				neu = b ? sha(b) : head;
 			} else if (revs.length === 2) {
 				old = sha(revs[0]);
 				neu = sha(revs[1]);
 			} else {
 				// Against the working tree, or the index with --staged.
-				old = sha(revs[0] ?? "HEAD");
-				contents = true;
+				old = revs[0] ? sha(revs[0]) : head;
+				contents = head;
 			}
 		}
 		writeWhole(meta, JSON.stringify({ root: top, vcs, old, new: neu, contents }));
