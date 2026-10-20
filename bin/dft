@@ -315,7 +315,9 @@ try {
 			const tool = ["--config", `merge-tools.dft.program=${JSON.stringify(script)}`, "--config", 'merge-tools.dft.diff-args=["$left","$right"]'];
 			r = run("jj", ["--no-pager", "--color=never", ...tool, "diff", "--tool", "dft", ...args], { env: { ...helperEnv, DFT_JJ: "1" } });
 		} else {
-			r = run("git", ["--no-pager", "diff", "--ext-diff", "--no-color", ...(args.length ? args : ["HEAD"])], { env: { ...helperEnv, GIT_EXTERNAL_DIFF: script } });
+			// git runs GIT_EXTERNAL_DIFF through the shell, and installed plugins live under "Application Support".
+			const quoted = `'${script.replace(/'/g, `'\\''`)}'`;
+			r = run("git", ["--no-pager", "diff", "--ext-diff", "--no-color", ...(args.length ? args : ["HEAD"])], { env: { ...helperEnv, GIT_EXTERNAL_DIFF: quoted } });
 		}
 		messages = `${r.stdout ?? ""}${r.stderr ?? ""}`;
 		status = r.status ?? 1;
