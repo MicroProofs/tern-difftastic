@@ -40,8 +40,8 @@ const BYTE_LIMIT = env("DFT_BYTE_LIMIT", String(MAX_FILE_BYTES));
 const PARSE_ERROR_LIMIT = env("DFT_PARSE_ERROR_LIMIT", "4");
 // A file that exceeds GRAPH_LIMIT is tried again at RETRY_GRAPH_LIMIT for up to RETRY_SECONDS.
 const GRAPH_LIMIT = env("DFT_GRAPH_LIMIT", "3000000");
-const RETRY_GRAPH_LIMIT = env("DFT_RETRY_GRAPH_LIMIT", "30000000");
-const RETRY_SECONDS = Number(env("DFT_RETRY_SECONDS", "20"));
+const RETRY_GRAPH_LIMIT = env("DFT_RETRY_GRAPH_LIMIT", "100000000");
+const RETRY_SECONDS = Number(env("DFT_RETRY_SECONDS", "60"));
 // Comma-separated `glob:language` pairs for difftastic's --override.
 const OVERRIDES = env("DFT_OVERRIDES", "*.uplc:Clojure,*.snap:text").split(",").filter(Boolean);
 

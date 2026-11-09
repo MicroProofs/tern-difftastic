@@ -88,9 +88,11 @@ Each is an environment variable read by `dft`:
 | `DFT_BYTE_LIMIT` | 2 MiB | 1 MB |
 | `DFT_PARSE_ERROR_LIMIT` | 4 | 0 |
 | `DFT_GRAPH_LIMIT` | 3,000,000 | 3,000,000 |
-| `DFT_RETRY_GRAPH_LIMIT` | 30,000,000: a file over `DFT_GRAPH_LIMIT` is tried again with this | none |
-| `DFT_RETRY_SECONDS` | 20: the retry gives up after this and keeps the line diff | none |
+| `DFT_RETRY_GRAPH_LIMIT` | 100,000,000: a file over `DFT_GRAPH_LIMIT` is tried again with this | none |
+| `DFT_RETRY_SECONDS` | 60: the retry gives up after this and keeps the line diff | none |
 | `DFT_OVERRIDES` | `*.uplc:Clojure,*.snap:text` (comma-separated `glob:language`) | none |
+
+The 100M retry can take about 12 GB of memory on a big file (Aiken's 234 KiB `gen_uplc.rs`); on a Mac with less RAM, lower `DFT_RETRY_GRAPH_LIMIT` and `DFT_RETRY_SECONDS`.
 
 ## Limits
 
